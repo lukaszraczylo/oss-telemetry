@@ -27,14 +27,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
       - uses: actions/cache@v5
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
       - run: go vet ./...
 
   staticcheck:
@@ -43,14 +43,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
       - uses: actions/cache@v5
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
       - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
       - run: staticcheck ./...
 
@@ -60,14 +60,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
       - uses: actions/cache@v5
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
 
@@ -77,14 +77,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
       - uses: actions/cache@v5
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
       - run: go install github.com/securego/gosec/v2/cmd/gosec@latest
       - run: gosec -quiet ./...
 
@@ -94,14 +94,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
       - uses: actions/cache@v5
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
       - run: go test -race -coverprofile=coverage.out ./...
       - uses: actions/upload-artifact@v7
         with:
@@ -114,9 +114,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.9.0
 
@@ -155,7 +155,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.22.x'
+          go-version: '1.25.x'
           check-latest: true
 
       # Action interface from
