@@ -1,0 +1,215 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dry-run-release:
+        description: "Compute release version, do not tag or release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Cancel any in-flight CI runs for the same branch when a new push lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+      - run: go vet ./...
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+      - run: staticcheck ./...
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  gosec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+      - run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+      - run: gosec -quiet ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+      - run: go test -race -coverprofile=coverage.out ./...
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+
+  golangci-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.9.0
+
+  # Aggregate gate — depends on every check above. Used as a single required
+  # status check in branch protection AND as a dependency for the release job.
+  ci-success:
+    runs-on: ubuntu-latest
+    needs: [vet, staticcheck, govulncheck, gosec, test, golangci-lint]
+    if: always()
+    steps:
+      - name: All checks passed
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        run: echo "ci-success"
+      - name: At least one check failed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "Failed/cancelled jobs:"
+          echo '${{ toJSON(needs) }}'
+          exit 1
+
+  # Auto-release fires on every clean push to main (and on manual
+  # workflow_dispatch for testing). Computes next SemVer from commit history
+  # via lukaszraczylo/semver-generator and creates a GitHub release.
+  # oss-telemetry is a pure library, so there are no binaries to publish —
+  # consumers `go get github.com/lukaszraczylo/oss-telemetry@<tag>`.
+  release:
+    needs: ci-success
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history so semver-generator sees all tags + commits
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+
+      # Action interface from
+      # https://github.com/lukaszraczylo/semver-generator/blob/main/action.yml
+      #   Inputs:  repository_local: true   (use already-cloned repo)
+      #            existing: true           (respect existing tags as base)
+      #   Output:  semantic_version         (bare version string, no "v" prefix)
+      - name: Compute next SemVer
+        id: semver
+        uses: lukaszraczylo/semver-generator@v1
+        with:
+          repository_local: true
+          existing: true
+          config_file: .semver.yaml
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          TAG="v${{ steps.semver.outputs.semantic_version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists; nothing to release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dry-run summary
+        if: github.event_name == 'workflow_dispatch' && inputs.dry-run-release == true
+        run: |
+          echo "Would release: v${{ steps.semver.outputs.semantic_version }}"
+          echo "Skipping tag + release (dry-run)."
+
+      - name: Tag release
+        if: |
+          steps.tag_check.outputs.exists == 'false' &&
+          (github.event_name != 'workflow_dispatch' || inputs.dry-run-release == false)
+        env:
+          TAG: ${{ steps.tag_check.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        if: |
+          steps.tag_check.outputs.exists == 'false' &&
+          (github.event_name != 'workflow_dispatch' || inputs.dry-run-release == false)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag_check.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag
