@@ -69,7 +69,11 @@ func main() {
 Call `Send` once at boot. Calling it more often just sends more pings; the
 server deduplicates.
 
-## How users disable telemetry
+## Disabling telemetry
+
+If you ship a binary that imports this library, link your users to this
+section (`https://github.com/lukaszraczylo/oss-telemetry#disabling-telemetry`)
+so they can find the opt-out paths.
 
 Any one of these turns it off:
 
