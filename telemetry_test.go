@@ -169,6 +169,98 @@ func TestSend_AcceptsCommonVersionShapes(t *testing.T) {
 	}
 }
 
+func TestSend_RejectsNonSemverJunk(t *testing.T) {
+	resetState(t)
+	srv := newCaptureServer(t, http.StatusNoContent)
+
+	// These match the old permissive regex but the receiver always
+	// rejected them with HTTP 400. The library now drops them client-side
+	// so callers like GMP's unset `appVersion = "dev"` produce zero traffic
+	// rather than a stream of HTTP 400s.
+	junk := []string{"dev", "next", "latest", "snapshot", "git-2026-05-22", "alpha", "abc.def"}
+	for _, v := range junk {
+		Send("tool", v)
+	}
+	Wait(500 * time.Millisecond)
+
+	if srv.Hits() != 0 {
+		t.Fatalf("expected 0 hits for non-semver junk, got %d", srv.Hits())
+	}
+}
+
+func TestSend_NormalizesLeadingV(t *testing.T) {
+	resetState(t)
+	srv := newCaptureServer(t, http.StatusNoContent)
+
+	Send("tool", "v1.2.3")
+	Send("tool", "V9.0.0")
+	Wait(2 * time.Second)
+
+	if srv.Hits() != 2 {
+		t.Fatalf("expected 2 hits, got %d", srv.Hits())
+	}
+
+	// Concurrent goroutines may arrive in any order, so compare the SET.
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	got := make(map[string]struct{}, len(srv.requests))
+	for _, req := range srv.requests {
+		if strings.HasPrefix(req.Version, "v") || strings.HasPrefix(req.Version, "V") {
+			t.Fatalf("wire version still has leading v: %q", req.Version)
+		}
+		got[req.Version] = struct{}{}
+	}
+	for _, want := range []string{"1.2.3", "9.0.0"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("missing normalized %q in wire versions %v", want, got)
+		}
+	}
+}
+
+func TestResolveModuleVersion_FallbackWhenUnknownModule(t *testing.T) {
+	// "nonexistent.example/none" will never appear in debug.BuildInfo of the
+	// test binary, so resolution must fall through to the fallback parameter.
+	got := ResolveModuleVersion("nonexistent.example/none", "0.0.0-fallback")
+	if got != "0.0.0-fallback" {
+		t.Fatalf("expected fallback, got %q", got)
+	}
+}
+
+func TestResolveModuleVersion_StripsLeadingVFromBuildInfo(t *testing.T) {
+	// During `go test`, the Main module's path is the package under test.
+	// Its build info Version is typically "(devel)" — which we treat as
+	// unusable and fall back. Verify that branch: pass the current module
+	// path; expect the fallback rather than a literal "(devel)" leak.
+	got := ResolveModuleVersion("github.com/lukaszraczylo/oss-telemetry", "0.0.0-fallback")
+	if got == "(devel)" {
+		t.Fatalf("resolved to (devel) — should fall back to caller-supplied value")
+	}
+	if got == "v0.0.0-fallback" {
+		t.Fatalf("leading v not stripped from fallback path: %q", got)
+	}
+}
+
+func TestSendForModule_FallbackPath(t *testing.T) {
+	resetState(t)
+	srv := newCaptureServer(t, http.StatusNoContent)
+
+	// Unknown modulePath → resolver returns the fallback, which validVersion
+	// must accept and Send forward.
+	SendForModule("tool", "nonexistent.example/none", "1.2.3")
+	Wait(2 * time.Second)
+
+	if srv.Hits() != 1 {
+		t.Fatalf("expected 1 hit, got %d", srv.Hits())
+	}
+	got, _ := srv.Last()
+	if got.Version != "1.2.3" {
+		t.Fatalf("expected wire version 1.2.3, got %q", got.Version)
+	}
+	if got.Project != "tool" {
+		t.Fatalf("expected project tool, got %q", got.Project)
+	}
+}
+
 func TestDisable_StopsSubsequentSends(t *testing.T) {
 	resetState(t)
 	srv := newCaptureServer(t, http.StatusNoContent)
@@ -329,9 +421,21 @@ func TestValidationHelpers(t *testing.T) {
 		{"1.2.3", true},
 		{"1.4.0-beta1", true},
 		{"v1.0.0", true},
+		{"V1.0.0", true},
 		{"1.0.0+meta", true},
+		{"1.0.0-rc.1+build.7", true},
+		{"1", true},
+		{"1.2", true},
 		{"", false},
 		{"has space", false},
+		{"dev", false},
+		{"next", false},
+		{"v", false},
+		{"v.1.2", false},
+		{"1.2.3.4", false},
+		{"-1.2.3", false},
+		{"1.2.3-", false},
+		{"1.2.3+", false},
 		{strings.Repeat("1", 32), true},
 		{strings.Repeat("1", 33), false},
 	}

@@ -34,6 +34,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,11 @@ func init() {
 // immediately. It never blocks, never panics, and never reports errors.
 // Invalid inputs, disabled state, and network failures are silently dropped.
 //
+// Version strings are validated against a SemVer-ish shape that mirrors the
+// receiver. An optional leading "v" or "V" is accepted and stripped before
+// transmission so that callers can pass either "v1.2.3" or "1.2.3"; the
+// wire form is always the unprefixed canonical version.
+//
 // Call once at program startup. Calling repeatedly will send repeated pings;
 // the server is responsible for deduplication.
 func Send(project, version string) {
@@ -81,13 +87,58 @@ func Send(project, version string) {
 	if !validProject(project) || !validVersion(version) {
 		return
 	}
+	canonical := normalizeVersion(version)
 
 	inflight.Add(1)
 	go func() {
 		defer inflight.Done()
 		defer func() { _ = recover() }()
-		dispatch(project, version)
+		dispatch(project, canonical)
 	}()
+}
+
+// SendForModule is the recommended call form for Go libraries: it resolves
+// the version automatically from Go's build info for the given module path
+// so consumers do not need to maintain a hand-bumped version constant in
+// source. Behaviour and contract are otherwise identical to [Send].
+//
+// Resolution order:
+//
+//  1. debug.ReadBuildInfo Deps entry for modulePath (authoritative when the
+//     library is consumed via go.mod);
+//  2. debug.ReadBuildInfo Main when the library is itself the main module
+//     (e.g. running its own tests or examples);
+//  3. fallback parameter, used only when build info is unavailable or
+//     unhelpful (replace directives, detached `go run`, ldflag override).
+//
+// Any leading "v" reported by build info is stripped to match the canonical
+// wire form. Empty / "(devel)" build versions are skipped in favour of the
+// next resolution source. Typical usage:
+//
+//	telemetry.SendForModule("my-tool", "github.com/me/my-tool", "0.0.0-dev")
+func SendForModule(project, modulePath, fallback string) {
+	Send(project, ResolveModuleVersion(modulePath, fallback))
+}
+
+// ResolveModuleVersion implements the version resolution used by
+// SendForModule. Exposed for callers that need to format the resolved
+// version (e.g. logging) without firing a ping.
+func ResolveModuleVersion(modulePath, fallback string) string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, d := range info.Deps {
+			if d != nil && d.Path == modulePath && isUsableBuildVersion(d.Version) {
+				return strings.TrimPrefix(d.Version, "v")
+			}
+		}
+		if info.Main.Path == modulePath && isUsableBuildVersion(info.Main.Version) {
+			return strings.TrimPrefix(info.Main.Version, "v")
+		}
+	}
+	return fallback
+}
+
+func isUsableBuildVersion(v string) bool {
+	return v != "" && v != "(devel)"
 }
 
 // Disable suppresses all subsequent Send calls in this process.
@@ -170,23 +221,94 @@ func validProject(p string) bool {
 	return true
 }
 
+// validVersion accepts SemVer-ish version strings with an optional leading
+// "v"/"V" prefix. Acceptable shape (after stripping the leading v):
+//
+//	MAJOR[.MINOR[.PATCH]] ("-"prerelease)? ("+"build)?
+//
+// where MAJOR/MINOR/PATCH are ASCII digit sequences and the prerelease/build
+// payloads are non-empty runs of [0-9A-Za-z.-]. This intentionally mirrors
+// the receiver's version regex so junk like "dev" or "git-2026-05-22" never
+// leaves the client (where it would only be rejected with HTTP 400 anyway).
 func validVersion(v string) bool {
 	n := len(v)
 	if n == 0 || n > maxVersionLen {
 		return false
 	}
-	for i := range n {
-		c := v[i]
-		switch {
-		case c >= 'A' && c <= 'Z',
-			c >= 'a' && c <= 'z',
-			c >= '0' && c <= '9',
-			c == '.', c == '+', c == '_', c == '-':
-		default:
+	if v[0] == 'v' || v[0] == 'V' {
+		v = v[1:]
+	}
+	if len(v) == 0 {
+		return false
+	}
+	return checkSemverShape(v)
+}
+
+// normalizeVersion strips an optional leading "v"/"V" so the on-the-wire
+// version matches the form stored server-side by the version refresher cron
+// (which also strips the leading v from release tags). Callers may pass
+// either "v1.2.3" or "1.2.3" — only the unprefixed form is transmitted.
+func normalizeVersion(v string) string {
+	if len(v) > 0 && (v[0] == 'v' || v[0] == 'V') {
+		return v[1:]
+	}
+	return v
+}
+
+func checkSemverShape(s string) bool {
+	i := 0
+	if !readDigitRun(s, &i) {
+		return false
+	}
+	for groups := 0; groups < 2 && i < len(s) && s[i] == '.'; groups++ {
+		i++
+		if !readDigitRun(s, &i) {
 			return false
 		}
 	}
-	return true
+	if i < len(s) && s[i] == '-' {
+		i++
+		if !readIdentRun(s, &i, '+') {
+			return false
+		}
+	}
+	if i < len(s) && s[i] == '+' {
+		i++
+		if !readIdentRun(s, &i, 0) {
+			return false
+		}
+	}
+	return i == len(s)
+}
+
+func readDigitRun(s string, i *int) bool {
+	start := *i
+	for *i < len(s) && s[*i] >= '0' && s[*i] <= '9' {
+		*i++
+	}
+	return *i > start
+}
+
+// readIdentRun consumes [0-9A-Za-z.-] until end-of-string or until `stop`
+// is hit (stop=0 disables the early-stop check). Returns false if no
+// characters were consumed (i.e. empty payload).
+func readIdentRun(s string, i *int, stop byte) bool {
+	start := *i
+	for *i < len(s) {
+		c := s[*i]
+		if stop != 0 && c == stop {
+			break
+		}
+		valid := (c >= '0' && c <= '9') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			c == '.' || c == '-'
+		if !valid {
+			return false
+		}
+		*i++
+	}
+	return *i > start
 }
 
 func isDisabledByEnv(project string) bool {
