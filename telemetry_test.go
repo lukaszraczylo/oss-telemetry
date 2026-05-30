@@ -25,22 +25,21 @@ type pingPayload struct {
 // each other. Tests share `disabled`, `endpoint`, and `inflight`.
 func resetState(t *testing.T) {
 	t.Helper()
-	disabled.Store(false)
+	atomic.StoreInt32(&disabled, 0)
 	t.Cleanup(func() {
-		disabled.Store(false)
+		atomic.StoreInt32(&disabled, 0)
 	})
 }
 
-// setEndpoint atomically retargets the ingest URL for the duration of a test
-// and restores it on cleanup. Safe even if Send goroutines outlive the test.
+// setEndpoint retargets the ingest URL for the duration of a test and restores
+// it on cleanup. Safe even if Send goroutines outlive the test (the setter is
+// mutex-guarded).
 func setEndpoint(t *testing.T, url string) {
 	t.Helper()
-	prev := *endpoint.Load()
-	s := url
-	endpoint.Store(&s)
+	prev := currentEndpoint()
+	setEndpointURL(url)
 	t.Cleanup(func() {
-		p := prev
-		endpoint.Store(&p)
+		setEndpointURL(prev)
 	})
 }
 

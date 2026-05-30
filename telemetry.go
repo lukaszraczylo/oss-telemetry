@@ -49,21 +49,35 @@ const (
 	maxVersionLen   = 32
 )
 
-// endpoint holds the ingest URL. Production code never mutates it; it is
-// atomic only so the package's own test suite can safely retarget it at
-// httptest servers while goroutines started by Send are still in flight.
-var endpoint atomic.Pointer[string]
-
+// Yaegi note: this package is consumed by the traefikoidc Traefik plugin, which
+// Traefik interprets with Yaegi (it vendors and interprets dependency source).
+// It therefore avoids generic stdlib types (atomic.Pointer[T], atomic.Bool) and
+// range-over-int (Go 1.22), which some Traefik/Yaegi runtimes cannot interpret.
+// Endpoint mutation uses a mutex-guarded string; the disabled flag uses the
+// function-based sync/atomic int32 API (atomic.LoadInt32/StoreInt32).
 var (
-	disabled atomic.Bool
+	// endpointURL holds the ingest URL. Production code never mutates it; the
+	// setter exists only so the test suite can retarget it at httptest servers
+	// while goroutines started by Send are still in flight.
+	endpointMu  sync.RWMutex
+	endpointURL = defaultEndpoint
+
+	disabled int32 // 0 = enabled, 1 = disabled; accessed via sync/atomic only
 	inflight sync.WaitGroup
 
 	client = &http.Client{Timeout: httpTimeout}
 )
 
-func init() {
-	s := defaultEndpoint
-	endpoint.Store(&s)
+func currentEndpoint() string {
+	endpointMu.RLock()
+	defer endpointMu.RUnlock()
+	return endpointURL
+}
+
+func setEndpointURL(u string) {
+	endpointMu.Lock()
+	endpointURL = u
+	endpointMu.Unlock()
 }
 
 // Send fires a single anonymous telemetry ping in the background and returns
@@ -78,7 +92,7 @@ func init() {
 // Call once at program startup. Calling repeatedly will send repeated pings;
 // the server is responsible for deduplication.
 func Send(project, version string) {
-	if disabled.Load() {
+	if atomic.LoadInt32(&disabled) != 0 {
 		return
 	}
 	if isDisabledByEnv(project) {
@@ -144,7 +158,7 @@ func isUsableBuildVersion(v string) bool {
 // Disable suppresses all subsequent Send calls in this process.
 // Idempotent and safe to call from any goroutine.
 func Disable() {
-	disabled.Store(true)
+	atomic.StoreInt32(&disabled, 1)
 }
 
 // Wait blocks until all in-flight pings have completed, or until timeout
@@ -173,7 +187,7 @@ func dispatch(project, version string) {
 	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, *endpoint.Load(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, currentEndpoint(), bytes.NewReader(body))
 	if err != nil {
 		return
 	}
@@ -208,7 +222,7 @@ func validProject(p string) bool {
 	if n == 0 || n > maxProjectLen {
 		return false
 	}
-	for i := range n {
+	for i := 0; i < n; i++ {
 		c := p[i]
 		switch {
 		case c >= 'a' && c <= 'z',
@@ -330,7 +344,7 @@ func isDisabledByEnv(project string) bool {
 func projectEnvKey(project string) string {
 	const suffix = "_DISABLE_TELEMETRY"
 	buf := make([]byte, 0, len(project)+len(suffix))
-	for i := range len(project) {
+	for i := 0; i < len(project); i++ {
 		c := project[i]
 		switch {
 		case c == '-':
