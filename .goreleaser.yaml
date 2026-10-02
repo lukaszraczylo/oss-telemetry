@@ -1,0 +1,13 @@
+version: 2
+project_name: oss-telemetry
+
+builds:
+  - skip: true
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^style:"
